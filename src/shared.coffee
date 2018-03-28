@@ -335,9 +335,9 @@ class JobCollectionBase extends Mongo.Collection
               resolved.push depJob._id
               log.push @_logMessage.resolved depJob._id, depJob.runId
             when "failed"
-              cancel = true
-              failed.push depJob._id
-              @_DDPMethod_jobLog job._id, null, "Antecedent job failed before save" unless dryRun
+              resolved.push depJob._id
+              log.push @_logMessage.resolved depJob._id, depJob.runId              
+              # @_DDPMethod_jobLog job._id, null, "Antecedent job failed before save" unless dryRun
             when "cancelled"
               cancel = true
               cancelled.push depJob._id
@@ -1261,16 +1261,63 @@ class JobCollectionBase extends Mongo.Collection
       mods
     )
     if newStatus is "failed" and num is 1
-      # Cancel any dependent jobs too
-      @find(
+      # Resolve depends
+      ids = @find(
         {
           depends:
             $all: [ id ]
         },
         {
           transform: null
+          fields:
+            _id: 1
         }
-      ).forEach (d) => @_DDPMethod_jobCancel d._id
+      ).fetch().map (d) => d._id
+
+      if ids.length > 0
+
+        mods =
+          $pull:
+            depends: id
+          $push:
+            resolved: id
+
+        if options.delayDeps?
+          after = new Date(time.valueOf() + options.delayDeps)
+          mods.$max =
+            after: after
+
+        if logObj = @_logMessage.resolved id, runId
+          mods.$push.log = logObj
+
+        n = @update(
+          {
+            _id:
+              $in: ids
+          }
+          mods
+          {
+            multi: true
+          }
+        )
+        if n isnt ids.length
+          console.warn "Not all dependent jobs were resolved #{ids.length} > #{n}"
+        # Try to promote any jobs that just had a dependency resolved
+        @_DDPMethod_jobReady ids
+
+
+
+      
+    #   # Cancel any dependent jobs too
+    #   @find(
+    #     {
+    #       depends:
+    #         $all: [ id ]
+    #     },
+    #     {
+    #       transform: null
+    #     }
+    #   ).forEach (d) => @_DDPMethod_jobCancel d._id
     if num is 1
       return true
     else
